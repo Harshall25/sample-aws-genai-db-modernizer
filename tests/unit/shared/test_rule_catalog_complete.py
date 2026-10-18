@@ -19,8 +19,12 @@ generated constants are guarded by ``test_engine_catalog.py`` and
    catalog by ``test_engine_catalog``), every score-weight table, every module-level
    numeric constant in the routing directories (``NUMERIC_DIRS``; class-attribute numbers
    are field defaults and not scanned), and every pattern-type literal in code and
-   engine-id literal in routing code (``if engine == "dynamodb": ...``). A new one fails until it either reads the
-   catalog or is added here with its reason, so the remaining exceptions can only shrink
+   engine-id literal in routing code (``if engine == "dynamodb": ...``). It also checks
+   engine-name keywords and display-name or concatenated-name branches in those routing
+   directories and ``src/api/``. Numeric comparisons are checked in a function body nested
+   under an explicit engine branch; unrelated numbers and numbers in the branch condition
+   are out of scope. A new one fails until it either reads the catalog or is added here with
+   its reason, so the remaining exceptions can only shrink
    on purpose. The inline-literal lists compare counts per file, so swapping one literal
    for another in the same file passes: they are a review prompt, not a proof.
 """
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -129,6 +134,7 @@ class TestEveryPatternCoversEveryEngine:
 # ---------------------------------------------------------------------------
 
 ENGINE_IDS = {e.id for e in catalog.engines()}
+ENGINE_DISPLAY_NAMES = {e.display_name for e in catalog.engines()}
 PATTERN_KEYS = {p.id for p in patterns()} | {a for p in patterns() for a in p.penalty_aliases}
 SCORE_DIMENSIONS = {"pattern_match", "complexity", "performance", "cost"}
 # Where routing happens: numeric module constants and engine-id literals in code are
@@ -139,6 +145,7 @@ NUMERIC_DIRS = (
     "src/tools/analysis/",
     "src/shared/",
 )
+API_DIRS = ("src/api/",)
 # Calls that read the catalog: a literal passed to one of these is a lookup key, not a rule.
 CATALOG_ACCESSORS = {
     "_guidance",
@@ -238,7 +245,7 @@ ENGINE_OR_PATTERN_TABLES: dict[str, tuple[frozenset[str], str]] = {
     ),
     "src/shared/sql_comments.py": (frozenset({"_NESTING_DIALECTS"}), _PLUMBING),
     "src/tools/schema/aurora_common/constraint_translator.py": (
-        frozenset({"PG_TARGET", "MYSQL_TARGET"}),
+        frozenset({"PG_TARGET", "MYSQL_TARGET", "_ENGINE"}),
         _PLUMBING,
     ),
     "src/tools/schema/aurora_common/ddl_generator.py": (
@@ -534,14 +541,77 @@ def _named_literals(value: ast.AST) -> set[str]:
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
             if name in CATALOG_ACCESSORS:
                 lookups |= {id(n) for arg in node.args for n in ast.walk(arg)}
+    named = ENGINE_IDS | ENGINE_DISPLAY_NAMES | PATTERN_KEYS
     return {
-        n.value
+        text
         for n in ast.walk(value)
-        if isinstance(n, ast.Constant)
-        and isinstance(n.value, str)
-        and id(n) not in lookups
-        and (n.value in ENGINE_IDS or n.value in PATTERN_KEYS)
+        if id(n) not in lookups
+        if (text := _literal_string(n)) in named
     }
+
+
+def _literal_string(node: ast.AST) -> str | None:
+    """Return a string made only from string literals and ``+`` operations."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_string(node.left)
+        right = _literal_string(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _engine_branch_literals(tree: ast.AST) -> set[int]:
+    """String expression nodes naming an engine in an ``if``/``elif`` test."""
+    names = ENGINE_IDS | ENGINE_DISPLAY_NAMES
+    return {
+        id(value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        for value in ast.walk(node.test)
+        if _literal_string(value) in names
+    }
+
+
+def _inline_numeric_rule_literals(tree: ast.AST) -> set[int]:
+    """Numbers compared inside a function's explicit engine branch.
+
+    Requiring a nested body keeps ordinary numeric arguments, indexes, formatting precision,
+    and compound conditions such as ``len(engines) == 2 and engine != ...`` out of scope.
+    """
+    found: set[int] = set()
+
+    def numeric_comparisons(node: ast.AST) -> None:
+        for candidate in ast.walk(node):
+            if not isinstance(candidate, ast.Compare):
+                continue
+            for operand in (candidate.left, *candidate.comparators):
+                number = operand.operand if isinstance(operand, ast.UnaryOp) else operand
+                if isinstance(number, ast.Constant) and type(number.value) in (int, float):
+                    found.add(id(number))
+
+    def visit(node: ast.AST, in_function: bool = False) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for child in node.body:
+                visit(child, True)
+            return
+        if isinstance(node, ast.If):
+            names_engine = any(
+                _literal_string(value) in ENGINE_IDS | ENGINE_DISPLAY_NAMES
+                for value in ast.walk(node.test)
+            )
+            if in_function and names_engine:
+                for child in node.body:
+                    numeric_comparisons(child)
+            for child in (*node.body, *node.orelse):
+                visit(child, in_function)
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, in_function)
+
+    visit(tree)
+    return found
 
 
 def _is_number(value: ast.AST) -> bool:
@@ -550,17 +620,18 @@ def _is_number(value: ast.AST) -> bool:
     return isinstance(value, ast.Constant) and type(value.value) in (int, float)
 
 
-def _scan() -> dict[str, dict]:
+def _scan_sources(sources: Iterable[tuple[str, str]]) -> dict[str, dict]:
     tables: dict[str, set[str]] = defaultdict(set)
     weights: dict[str, set[str]] = defaultdict(set)
     numbers: dict[str, set[str]] = defaultdict(set)
     inline: dict[str, int] = defaultdict(int)
     inline_engines: dict[str, int] = defaultdict(int)
-    for path in sorted(SRC.rglob("*.py")):
-        rel = path.relative_to(ROOT).as_posix()
+    inline_engine_keywords: dict[str, int] = defaultdict(int)
+    inline_numbers: dict[str, int] = defaultdict(int)
+    for rel, source in sources:
         if rel.startswith("src/shared/catalog/"):
             continue  # the loader itself
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = ast.parse(source)
         in_constants: set[int] = set()
         module_level = {name for name, _value in _module_constants(tree)}
         for name, value in [*_module_constants(tree), *_class_attributes(tree)]:
@@ -586,7 +657,18 @@ def _scan() -> dict[str, dict]:
             and isinstance(node.body[0].value, ast.Constant)
         }
         lookups = _accessor_arguments(tree)
+        branch_literals = _engine_branch_literals(tree)
+        if rel.startswith(NUMERIC_DIRS) or rel.startswith(API_DIRS):
+            numeric_count = len(_inline_numeric_rule_literals(tree))
+            if numeric_count:
+                inline_numbers[rel] = numeric_count
         for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.keyword)
+                and node.arg in ENGINE_IDS
+                and (rel.startswith(NUMERIC_DIRS) or rel.startswith(API_DIRS))
+            ):
+                inline_engine_keywords[rel] += 1
             if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
                 continue
             if id(node) in in_constants or id(node) in docstrings or id(node) in lookups:
@@ -595,13 +677,36 @@ def _scan() -> dict[str, dict]:
                 inline[rel] += 1
             elif node.value in ENGINE_IDS and rel.startswith(NUMERIC_DIRS):
                 inline_engines[rel] += 1
+            elif (
+                node.value in ENGINE_IDS | ENGINE_DISPLAY_NAMES
+                and id(node) in branch_literals
+                and rel.startswith(NUMERIC_DIRS + API_DIRS)
+            ):
+                inline_engines[rel] += 1
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.BinOp) or id(node) not in branch_literals:
+                continue
+            if (
+                rel.startswith(NUMERIC_DIRS + API_DIRS)
+                and _literal_string(node) in ENGINE_IDS | ENGINE_DISPLAY_NAMES
+            ):
+                inline_engines[rel] += 1
     return {
         "tables": tables,
         "weights": weights,
         "numbers": numbers,
         "inline": inline,
         "inline_engines": inline_engines,
+        "inline_engine_keywords": inline_engine_keywords,
+        "inline_numbers": inline_numbers,
     }
+
+
+def _scan() -> dict[str, dict]:
+    return _scan_sources(
+        (path.relative_to(ROOT).as_posix(), path.read_text(encoding="utf-8"))
+        for path in sorted(SRC.rglob("*.py"))
+    )
 
 
 def _accessor_arguments(tree: ast.AST) -> set[int]:
@@ -683,6 +788,19 @@ class TestNoRoutingRuleOutsideTheCatalog:
             f"(found, pinned) per file: {_count_drift(found, pinned)}"
         )
 
+    def test_engine_id_keyword_names_are_not_inline_rules(self, scan) -> None:
+        assert not scan["inline_engine_keywords"], (
+            "An engine id is used as a keyword name. Keep engine choices in the catalog: "
+            f"{dict(scan['inline_engine_keywords'])}"
+        )
+
+    def test_numeric_comparisons_inside_engine_branches_are_not_inline_rules(self, scan) -> None:
+        assert not scan["inline_numbers"], (
+            "A numeric rule is compared inside a function body nested under an explicit "
+            "engine branch. "
+            f"Move the rule to the catalog or name it as a checked constant: {dict(scan['inline_numbers'])}"
+        )
+
     def test_every_listed_exception_has_a_reason(self) -> None:
         for table in (ENGINE_OR_PATTERN_TABLES, SCORE_WEIGHT_TABLES, NUMERIC_CONSTANTS):
             for path, (names, why) in table.items():
@@ -747,3 +865,101 @@ def test_the_pattern_model_has_no_engine_specific_field() -> None:
     named after an engine."""
     fields = set(PatternEntry.model_fields)
     assert not {f for f in fields if any(e in f for e in ENGINE_IDS)}
+
+
+@pytest.mark.parametrize(
+    ("source", "expected", "rel", "guard"),
+    [
+        (
+            """
+def choose():
+    return dict(dynamodb=5)
+""",
+            "keyword",
+            "src/agents/referee/planted.py",
+            "test_engine_id_keyword_names_are_not_inline_rules",
+        ),
+        (
+            """
+def choose(engine):
+    if engine == \"DynamoDB\":
+        return True
+    return False
+""",
+            "branch",
+            "src/agents/referee/planted.py",
+            "test_inline_engine_id_literals",
+        ),
+        (
+            """
+def choose(engine):
+    if engine == \"dynamo\" + \"db\":
+        return True
+    return False
+""",
+            "branch",
+            "src/agents/referee/planted.py",
+            "test_inline_engine_id_literals",
+        ),
+        (
+            """
+def choose(engine, rows):
+    if engine == \"dynamodb\":
+        if rows > 100:
+            return True
+    return False
+""",
+            "number",
+            "src/agents/referee/planted.py",
+            "test_numeric_comparisons_inside_engine_branches_are_not_inline_rules",
+        ),
+        (
+            """
+def choose(engine):
+    if engine == \"dynamodb\":
+        return True
+    return False
+""",
+            "branch",
+            "src/api/planted.py",
+            "test_inline_engine_id_literals",
+        ),
+    ],
+    ids=("dict-keyword", "display-name", "concatenated-name", "inline-number", "api-branch"),
+)
+def test_engine_rule_shapes_are_detected(
+    source: str, expected: str, rel: str, guard: str, scan
+) -> None:
+    """Each #900 report form reaches the real guard with a planted rule."""
+    planted = _scan_sources([(rel, source)])
+    combined = {key: dict(values) for key, values in scan.items()}
+    for key, values in planted.items():
+        combined[key].update(values)
+
+    if expected == "keyword":
+        assert planted["inline_engine_keywords"][rel] == 1
+    elif expected == "number":
+        assert planted["inline_numbers"][rel] == 1
+    else:
+        assert planted["inline_engines"][rel] == 1
+
+    with pytest.raises(AssertionError):
+        getattr(TestNoRoutingRuleOutsideTheCatalog(), guard)(combined)
+
+
+def test_numeric_and_keyword_checks_ignore_unrelated_values() -> None:
+    source = """
+def format_result(score):
+    if score > 100:
+        return dict(retries=5)
+    return None
+
+def summarize(engines, primary):
+    if len(engines) == 2 and primary != "dynamodb":
+        return engines[0]
+    return None
+"""
+    scan = _scan_sources([("src/api/unrelated.py", source)])
+
+    assert scan["inline_numbers"] == {}
+    assert scan["inline_engine_keywords"] == {}
