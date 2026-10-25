@@ -115,8 +115,9 @@ class DdlResult:
     full_ddl: str
     residuals: list[dict]
     # Source indexes the draft could not carry over as written: a partial-index
-    # predicate Aurora cannot take, or an access method it cannot create or the
-    # collector cannot describe (#293): {"table", "index", "reason"}.
+    # predicate Aurora cannot take, an access method it cannot create or the
+    # collector cannot describe (#293), or an expression key the collector cannot
+    # name (#295): {"table", "index", "reason"}.
     index_notes: list[dict] = field(default_factory=list)
     # Columns that carry over but need a look: {"table", "column", "kind", "reason"};
     # kind "default" (a source default the draft dropped, or turned into an
@@ -326,9 +327,23 @@ def is_primary_key_index(idx: AgentIndex, table: AgentTable) -> bool:
     return cols == pk or (idx.index_name.lower().endswith("_pkey") and set(cols) == set(pk))
 
 
+def expression_indexes(table: AgentTable) -> list[AgentIndex]:
+    """Source indexes with an expression key, which the draft cannot carry over.
+
+    The collector names only the plain column keys (#295), so the key list is
+    incomplete and anything the draft built from it would be a different index.
+    They leave the draft through ``DdlResult.index_notes`` instead.
+    """
+    return [i for i in table.indexes or [] if i.has_expressions]
+
+
 def secondary_indexes(table: AgentTable) -> list[AgentIndex]:
     """The draft's secondary indexes, in ``TableDDL.index_sql`` order."""
-    return [i for i in table.indexes or [] if not is_primary_key_index(i, table)]
+    return [
+        i
+        for i in table.indexes or []
+        if not i.has_expressions and not is_primary_key_index(i, table)
+    ]
 
 
 _TEXT_TYPES = ("VARCHAR", "CHAR", "CHARACTER", "TEXT", "CITEXT")
@@ -472,6 +487,34 @@ def _index_sql(
 ) -> list[str]:
     statements: list[str] = []
     columns = [c.column_name for c in table.columns]
+    for idx in expression_indexes(table):
+        # The collector names only the plain keys, so an index built from them
+        # would be narrower than the source -- and a UNIQUE one would reject
+        # rows the source accepts. Leave it out and say why.
+        unique = bool(idx.is_unique)  # nosemgrep: is-function-without-parentheses
+        # The expressions alone, not the whole CREATE statement: a real
+        # pg_get_indexdef runs well past excerpt()'s cut, and what the
+        # customer needs in order to recreate the index is the part the draft
+        # could not carry over.
+        keys = idx.index_expressions or idx.index_def
+        notes.append(
+            {
+                "table": table.table_name,
+                "index": idx.index_name,
+                "reason": (
+                    "Source index has expression keys"
+                    + (f" ({excerpt(keys)})" if keys else "")
+                    + ": the draft leaves it out rather than create "
+                    + ("a UNIQUE index" if unique else "an index")
+                    + " on part of its keys."
+                    + (
+                        " Recreate it on the target to keep the uniqueness it enforces."
+                        if unique
+                        else " Recreate it on the target."
+                    )
+                ),
+            }
+        )
     text_columns = _text_columns(column_ddls)
     if dialect is MYSQL:
         for idx in secondary_indexes(table):

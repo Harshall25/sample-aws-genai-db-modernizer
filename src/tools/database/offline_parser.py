@@ -20,6 +20,7 @@ import boto3
 from src.shared.sample_rows import without_sample_rows
 from src.shared.sql_spans import span_dialect
 from src.tools.database.collection_text import extract_json_object
+from src.tools.database.index_keys import expression_key_fields
 from src.tools.sql.query_type import statement_query_type
 from src.tools.validation.ingestion_limits import check_collection_counts, check_file_size
 
@@ -194,8 +195,11 @@ def parse_offline_collection(
                 "is_primary": idx_name == "PRIMARY",
                 "index_type": str(i.get("index_type") or "btree").lower(),
                 "predicate": i.get("predicate") or None,
+                **expression_key_fields(i),
             }
-        indexes_by_table[tbl][idx_name]["columns"].append(i["column_name"])
+        # An expression key carries no column name; the index still counts.
+        if i.get("column_name") is not None:
+            indexes_by_table[tbl][idx_name]["columns"].append(i["column_name"])
 
     fks_by_table: dict[str, dict[str, dict]] = {}
     for fk in data.get("foreign_keys", []):

@@ -13,6 +13,7 @@ import re
 from src.tools.aws.ssm_executor import SSMExecutor
 from src.tools.database import live_sql
 from src.tools.database.filter_columns import where_columns
+from src.tools.database.index_keys import expression_key_fields
 from src.tools.database.live_sql import LiveQueryReader
 from src.tools.sql.query_type import statement_query_type
 
@@ -126,11 +127,16 @@ class PostgreSQLRemoteCollector:
                 ix.indisunique AS is_unique,
                 ix.indisprimary AS is_primary,
                 am.amname AS index_type,
-                pg_get_expr(ix.indpred, ix.indrelid) AS predicate
+                pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
+                (ix.indexprs IS NOT NULL) AS has_expressions,
+                pg_get_expr(ix.indexprs, ix.indrelid) AS index_expressions,
+                pg_get_indexdef(ix.indexrelid) AS index_def
             FROM pg_class t
             JOIN pg_index ix ON t.oid = ix.indrelid
             JOIN pg_class i ON i.oid = ix.indexrelid
-            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+            -- LEFT, not INNER: an expression key has attnum 0 and matches no
+            -- pg_attribute row, and an inner join would drop the whole index.
+            LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
             JOIN pg_am am ON i.relam = am.oid
             WHERE t.relname = '{table_name}'
               AND t.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
@@ -147,8 +153,10 @@ class PostgreSQLRemoteCollector:
                     "is_primary": r.get("is_primary") in (True, "t", "true"),
                     "index_type": str(r.get("index_type") or "btree").lower(),
                     "predicate": r.get("predicate") or None,
+                    **expression_key_fields(r),
                 }
-            indexes[name]["columns"].append(r["column_name"])
+            if r.get("column_name") is not None:
+                indexes[name]["columns"].append(r["column_name"])
         return list(indexes.values())
 
     def collect_foreign_keys(self, table_name: str) -> list[dict]:

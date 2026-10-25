@@ -363,13 +363,48 @@ class Column(BaseModel):
 
 class Index(BaseModel):
     index_name: str = Field(..., description="Index name")
-    columns: list[str] = Field(..., min_length=1, description="List of column names in index")
+    columns: list[str] = Field(
+        ...,
+        description="Plain column keys of the index; empty when every key is an expression",
+    )
     is_unique: bool = Field(..., description="Whether index enforces uniqueness")
     is_primary: bool | None = Field(False, description="Whether this is the primary key index")
     index_type: IndexType | None = Field(None, description="Index type")
     predicate: str | None = Field(
         None, description="Partial-index predicate (PostgreSQL WHERE clause), if any"
     )
+    has_expressions: bool = Field(
+        False,
+        description="Index has expression keys, so ``columns`` is not the whole key list",
+    )
+    index_expressions: str | None = Field(
+        None,
+        description=(
+            "The expression keys alone (pg_get_expr of pg_index.indexprs); "
+            "set only when ``has_expressions``"
+        ),
+    )
+    index_def: str | None = Field(
+        None,
+        description=(
+            "Source CREATE INDEX text (pg_get_indexdef); set only when "
+            "``has_expressions``, since every other index is fully described by "
+            "``columns``"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _named_columns_or_expression_keys(self) -> "Index":
+        """An empty ``columns`` is only meaningful for an expression index.
+
+        The field used to carry ``min_length=1``. Expression keys have no
+        column to name (#295), so that floor had to go -- but without this an
+        index collected with no keys at all still validates, and the draft
+        renders it as ``CREATE INDEX ... ON "t" ()``.
+        """
+        if not self.columns and not self.has_expressions:
+            raise ValueError("an index with no expression keys must name at least one column")
+        return self
 
 
 class ForeignKey(BaseModel):

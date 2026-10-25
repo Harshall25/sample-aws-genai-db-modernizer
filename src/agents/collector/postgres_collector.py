@@ -377,6 +377,13 @@ def _build_tables(schema_raw: dict) -> list[Table]:
                 is_primary=i.get("is_primary", False),
                 index_type=_normalize_index_type(i.get("index_type", "btree")),
                 predicate=i.get("predicate") or None,
+                # #295: an expression key has no column to name, so ``columns``
+                # alone is not the whole key list -- carry the flag through or
+                # the draft narrows the index (and an expression-only one fails
+                # the contract outright).
+                has_expressions=bool(i.get("has_expressions")),
+                index_expressions=i.get("index_expressions") or None,
+                index_def=i.get("index_def") or None,
             )
             for i in t.get("indexes", [])
         ] or None

@@ -82,13 +82,18 @@ indexes_data AS (
       array_position(ix.indkey, a.attnum) AS seq_in_index,
       CASE WHEN ix.indisunique THEN 0 ELSE 1 END AS non_unique,
       am.amname AS index_type,
-      pg_get_expr(ix.indpred, ix.indrelid) AS predicate
+      pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
+      (ix.indexprs IS NOT NULL) AS has_expressions,
+      pg_get_expr(ix.indexprs, ix.indrelid) AS index_expressions,
+      pg_get_indexdef(ix.indexrelid) AS index_def
     FROM pg_index ix
     JOIN pg_class t ON t.oid = ix.indrelid
     JOIN pg_class i ON i.oid = ix.indexrelid
     JOIN pg_namespace n ON n.oid = t.relnamespace
     JOIN pg_am am ON am.oid = i.relam
-    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+    -- LEFT, not INNER: an expression key has attnum 0 and matches no
+    -- pg_attribute row, and an inner join would drop the whole index.
+    LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
   ) i
 ),

@@ -142,6 +142,15 @@ class AgentIndex(BaseModel):
         description="The source index's access method (#293); absent in older inputs, read as btree",
     )
     predicate: str | None = Field(None, description="Partial-index predicate, if any")
+    has_expressions: bool = Field(
+        False, description="Some key is an expression, so ``columns`` is only part of the key"
+    )
+    index_expressions: str | None = Field(
+        None, description="The expression keys alone; set only when ``has_expressions``"
+    )
+    index_def: str | None = Field(
+        None, description="Source CREATE INDEX text; set only when ``has_expressions``"
+    )
 
 
 class AgentForeignKey(BaseModel):
@@ -597,6 +606,9 @@ def project_schema_design_input(
                         is_primary=idx.is_primary,  # nosemgrep: is-function-without-parentheses
                         index_type=idx.index_type,
                         predicate=idx.predicate,
+                        has_expressions=idx.has_expressions,
+                        index_expressions=idx.index_expressions,
+                        index_def=idx.index_def,
                     )
                     for idx in (t.indexes or [])
                 ]
