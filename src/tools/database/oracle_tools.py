@@ -15,6 +15,7 @@ import re
 
 from src.tools.aws.ssm_executor import SSMExecutor
 from src.tools.database import live_sql
+from src.tools.database.index_keys import add_index_key
 from src.tools.database.live_sql import LiveQueryReader
 from src.tools.sql.query_type import statement_query_type
 
@@ -216,8 +217,13 @@ class OracleRemoteCollector:
                     "is_unique": str(r.get("uniqueness") or "").upper() == "UNIQUE",
                     "is_primary": str(r.get("is_primary") or "").upper() == "YES",
                     "index_type": _normalize_index_type(r.get("index_type")),
+                    "has_expressions": False,
+                    "index_expressions": None,
                 }
-            indexes[name]["columns"].append(str(r.get("column_name") or "").lower())
+            # A function-based key is reported as its hidden SYS_NCnnnnn$ column (#295):
+            # flag the index instead of keying it on a column the table does not show.
+            column = str(r.get("column_name") or "").lower()
+            add_index_key(indexes[name], {"column_name": column}, "oracle")
         return list(indexes.values())
 
     def collect_foreign_keys(self, table_name: str, owner: str | None = None) -> list[dict]:

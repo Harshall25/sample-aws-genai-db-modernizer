@@ -161,15 +161,12 @@ def _parse_create_table(stmt: str, database_name: str, dialect: str = "mysql") -
 
         # INDEX / UNIQUE INDEX / KEY (MySQL inline syntax — T-SQL uses
         # CREATE INDEX as separate statements outside CREATE TABLE).
-        idx_match = re.match(
-            r"(?i)(UNIQUE\s+)?(?:INDEX|KEY)\s+[`\"\[]?(\w+)[`\"\]]?\s*\(([^)]+)\)", part
-        )
+        idx_match = re.match(r"(?i)(UNIQUE\s+)?(?:INDEX|KEY)\s+[`\"\[]?(\w+)[`\"\]]?\s*\(", part)
         if idx_match:
-            idx_cols = [_unquote(c) for c in idx_match.group(3).split(",")]
             indexes.append(
                 {
                     "index_name": idx_match.group(2),
-                    "columns": idx_cols,
+                    **_index_keys(part[idx_match.end() - 1 :]),
                     "is_unique": bool(idx_match.group(1)),
                     "is_primary": False,
                     "index_type": "btree",
@@ -179,15 +176,14 @@ def _parse_create_table(stmt: str, database_name: str, dialect: str = "mysql") -
 
         # CONSTRAINT name UNIQUE (cols) — T-SQL inline unique constraint
         unique_match = re.match(
-            r"(?i)CONSTRAINT\s+[`\"\[]?(\w+)[`\"\]]?\s+UNIQUE\s*(?:CLUSTERED|NONCLUSTERED)?\s*\(([^)]+)\)",
+            r"(?i)CONSTRAINT\s+[`\"\[]?(\w+)[`\"\]]?\s+UNIQUE\s*(?:CLUSTERED|NONCLUSTERED)?\s*\(",
             part,
         )
         if unique_match:
-            uq_cols = [_unquote(c) for c in unique_match.group(2).split(",")]
             indexes.append(
                 {
                     "index_name": unique_match.group(1),
-                    "columns": uq_cols,
+                    **_index_keys(part[unique_match.end() - 1 :]),
                     "is_unique": True,
                     "is_primary": False,
                     "index_type": "btree",
@@ -293,6 +289,39 @@ def _parse_column(part: str, ordinal: int) -> dict | None:
         "column_key": "PRI" if is_primary else "",
         "extra": "auto_increment" if auto_inc else "",
         "is_primary": is_primary,
+    }
+
+
+# A key part that names a column: the identifier, an optional MySQL prefix length
+# and an optional sort order. Anything else (MySQL's ``(lower(name))``) is an expression.
+_COLUMN_KEY = re.compile(
+    r"[`\"\[]?(\w+)[`\"\]]?\s*(?:\(\s*\d+\s*\))?(?:\s+(?:ASC|DESC))?", re.IGNORECASE
+)
+
+
+def _index_keys(key_list: str) -> dict:
+    """``columns`` and the #295 expression fields for an inline index's key list.
+
+    ``key_list`` starts at the list's opening parenthesis. The list is split on its
+    top-level commas, so a functional key part like ``(lower(name))`` is one key, and
+    it never joins ``columns``: an index keyed on the rest would be narrower than the
+    source's, and a narrower UNIQUE index rejects rows the source accepts.
+    """
+    columns: list[str] = []
+    expressions: list[str] = []
+    for key in _split_top_level(_extract_body(key_list) or ""):
+        key = key.strip()
+        if not key:
+            continue
+        plain = _COLUMN_KEY.fullmatch(key)
+        if plain:
+            columns.append(plain.group(1))
+        else:
+            expressions.append(key)
+    return {
+        "columns": columns,
+        "has_expressions": bool(expressions),
+        "index_expressions": ", ".join(expressions) or None,
     }
 
 

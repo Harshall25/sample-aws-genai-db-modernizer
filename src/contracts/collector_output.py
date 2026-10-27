@@ -35,6 +35,10 @@ Version History:
 - 4.1 (2026-10-25, #293): Added IndexType members spgist and brin, PostgreSQL access
   methods the collectors already capture; they used to be coerced to other offline and
   rejected live.
+- 4.2 (2026-10-27, #295): Added optional ``has_expressions``, ``index_expressions`` and
+  ``index_def`` to ``Index``; ``columns`` may now be empty, for an index whose every key
+  is an expression (PostgreSQL expression keys, MySQL 8 functional key parts, Oracle
+  function-based keys).
 """
 
 import re
@@ -380,14 +384,15 @@ class Index(BaseModel):
     index_expressions: str | None = Field(
         None,
         description=(
-            "The expression keys alone (pg_get_expr of pg_index.indexprs); "
-            "set only when ``has_expressions``"
+            "The expression keys alone, when the source reports them (PostgreSQL "
+            "pg_get_expr of pg_index.indexprs, MySQL statistics.EXPRESSION); set only "
+            "when ``has_expressions``"
         ),
     )
     index_def: str | None = Field(
         None,
         description=(
-            "Source CREATE INDEX text (pg_get_indexdef); set only when "
+            "Source CREATE INDEX text (PostgreSQL pg_get_indexdef); set only when "
             "``has_expressions``, since every other index is fully described by "
             "``columns``"
         ),
@@ -816,7 +821,7 @@ class CollectorOutputContract(BaseModel):
     """
 
     contract_version: str = Field(
-        default="4.1",
+        default="4.2",
         pattern=r"^\d+\.\d+$",
         description="Contract version (MAJOR.MINOR format)",
     )

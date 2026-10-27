@@ -203,6 +203,45 @@ class TestProjectionFunction:
         [pkey, email] = agent_collector.tables[0].indexes
         assert (pkey.index_type, email.index_type) == (IndexType.btree, IndexType.gin)
 
+    def test_projection_carries_the_expression_key_fields(self, valid_collector_output_data):
+        """#295: an index with expression keys stays flagged on the designers' input,
+        so the Aurora draft notes it instead of building a UNIQUE index on its plain
+        keys alone; a plain index carries no index text."""
+        import copy
+
+        from src.contracts.collector_output import CollectorOutputContract
+        from src.tools.schema.aurora_common.ddl_generator import generate_pg_ddl
+
+        data = copy.deepcopy(valid_collector_output_data)
+        data["database_schema"]["tables"][0]["indexes"][1].update(
+            {
+                "index_name": "u_email_lower_name",
+                "has_expressions": True,
+                "index_expressions": "lower((name)::text)",
+                "index_def": (
+                    "CREATE UNIQUE INDEX u_email_lower_name ON public.users "
+                    "USING btree (email, lower((name)::text))"
+                ),
+            }
+        )
+        collector = CollectorOutputContract.model_validate(data)
+
+        agent_collector, _, _ = project_schema_design_input(collector, _users_analysis())
+
+        users = agent_collector.tables[0]
+        [pkey, expr] = users.indexes
+        assert (expr.columns, expr.has_expressions) == (["email"], True)
+        assert expr.index_expressions == "lower((name)::text)"
+        assert expr.index_def is not None and expr.index_def.endswith("lower((name)::text))")
+        assert (pkey.has_expressions, pkey.index_expressions, pkey.index_def) == (
+            False,
+            None,
+            None,
+        )
+        result = generate_pg_ddl([users], source_engine="postgresql")
+        assert "u_email_lower_name" not in result.full_ddl
+        assert [n["index"] for n in result.index_notes] == ["u_email_lower_name"]
+
     def test_projection_carries_only_the_calls_key_scoped_counts(self, valid_collector_output_data):
         """#377: the DynamoDB designer is given the key-scoped counts among its own
         queries, each key column with its cardinality or "unknown"."""
@@ -318,3 +357,54 @@ class TestQueryLogSourceEnumSync:
         from src.contracts.schema_design_input import QueryLogSource as SchemaEnum
 
         assert SchemaEnum("dmv_query_stats") == SchemaEnum.dmv_query_stats
+
+
+def _users_analysis():
+    """The smallest analysis contract ``project_schema_design_input`` takes for the
+    contract fixture's ``public.users`` table."""
+    from src.contracts.analysis_output import (
+        AgentMetadata,
+        AnalysisOutputContract,
+        CostEstimate,
+        Pattern,
+        TableRecommendation,
+        TargetDatabase,
+        WorkloadAnalysis,
+    )
+
+    return AnalysisOutputContract(
+        contract_version="2.1",
+        agent_metadata=AgentMetadata(
+            agent_name="dynamodb-analysis-agent",
+            agent_version="1.0.0",
+            target_database=TargetDatabase.DYNAMODB,
+            analysis_timestamp="2024-01-15T12:00:00Z",
+            analysis_duration_seconds=30.0,
+        ),
+        table_recommendations=[
+            TableRecommendation(
+                table_id="public.users",
+                confidence_score=85,
+                score_breakdown={
+                    "pattern_match_score": 90,
+                    "complexity_score": 80,
+                    "performance_score": 85,
+                    "cost_score": 75,
+                },
+            )
+        ],
+        workload_analysis=WorkloadAnalysis(
+            patterns_detected=[
+                Pattern(
+                    pattern_id="p1",
+                    pattern_type="key-value-lookup",
+                    confidence="HIGH",
+                    query_ids=["q1-select-users"],
+                    table_ids=["public.users"],
+                )
+            ]
+        ),
+        cost_estimate=CostEstimate(
+            monthly_cost_usd=50.0, cost_components={"read": 30, "write": 20}
+        ),
+    )

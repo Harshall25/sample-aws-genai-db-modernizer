@@ -5397,8 +5397,46 @@
                                       "kind": "scalar",
                                       "type": "string"
                                     },
-                                    "kind": "array",
-                                    "minItems": 1
+                                    "kind": "array"
+                                  }
+                                },
+                                "has_expressions": {
+                                  "required": false,
+                                  "schema": {
+                                    "kind": "scalar",
+                                    "type": "boolean"
+                                  }
+                                },
+                                "index_def": {
+                                  "required": false,
+                                  "schema": {
+                                    "kind": "anyOf",
+                                    "members": [
+                                      {
+                                        "kind": "scalar",
+                                        "type": "null"
+                                      },
+                                      {
+                                        "kind": "scalar",
+                                        "type": "string"
+                                      }
+                                    ]
+                                  }
+                                },
+                                "index_expressions": {
+                                  "required": false,
+                                  "schema": {
+                                    "kind": "anyOf",
+                                    "members": [
+                                      {
+                                        "kind": "scalar",
+                                        "type": "null"
+                                      },
+                                      {
+                                        "kind": "scalar",
+                                        "type": "string"
+                                      }
+                                    ]
                                   }
                                 },
                                 "index_name": {
@@ -8520,8 +8558,8 @@
         }
       }
     },
-    "schema_hash": "f1a31df8228ad7aee0ca342281de75eaca81ddf3c2aa33971f6f9fdf51900763",
-    "version": "4.1"
+    "schema_hash": "f913373e81ba09c589e5f4ccce0d627315cc2b0e631e7bd5d730d283af4ff2f7",
+    "version": "4.2"
   },
   "data_movement_plan.DataMovementPlan": {
     "fields": {

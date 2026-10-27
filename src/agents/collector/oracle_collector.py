@@ -31,6 +31,7 @@ from src.agents.collector.mysql_collector import (
     _dict_to_query_pattern,
     _enrich_patterns_from_pi_and_cw,
     _live_os_stats,
+    _normalize_index_type,
     _parse_ddl_raw,
 )
 from src.contracts.collector_input import CollectionMode, CollectorInput
@@ -40,7 +41,6 @@ from src.contracts.collector_output import (
     DeploymentType,
     ForeignKey,
     Index,
-    IndexType,
     Metadata,
     Metrics,
     NormalizedDataType,
@@ -59,7 +59,7 @@ from src.contracts.collector_output import (
 from src.shared.contract_versioning import load_contract
 from src.tools.aws.s3_storage import init_storage
 from src.tools.aws.ssm_executor import SSMExecutor
-from src.tools.database.oracle_tools import OracleRemoteCollector, _normalize_index_type
+from src.tools.database.oracle_tools import OracleRemoteCollector
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +381,14 @@ def _build_tables(schema_raw: dict) -> list[Table]:
                 columns=i["columns"],
                 is_unique=i["is_unique"],
                 is_primary=i.get("is_primary", False),
-                index_type=IndexType(_normalize_index_type(i.get("index_type") or "btree")),
+                # The live query reports Oracle's own kinds ("functional", "bitmap"),
+                # which the contract has no value for: the shared normalizer reads them
+                # as "other", as the offline script does, instead of failing the build.
+                index_type=_normalize_index_type(i.get("index_type") or "btree"),
+                # #295: a function-based key names no column, so ``columns`` alone is
+                # not the whole key list; carry the flag or the draft narrows the index.
+                has_expressions=bool(i.get("has_expressions")),
+                index_expressions=i.get("index_expressions") or None,
             )
             for i in t.get("indexes", [])
         ] or None

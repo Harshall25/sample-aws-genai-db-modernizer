@@ -13,7 +13,7 @@ import re
 from src.tools.aws.ssm_executor import SSMExecutor
 from src.tools.database import live_sql
 from src.tools.database.filter_columns import where_columns
-from src.tools.database.index_keys import expression_key_fields
+from src.tools.database.index_keys import add_index_key, expression_key_fields
 from src.tools.database.live_sql import LiveQueryReader
 from src.tools.sql.query_type import statement_query_type
 
@@ -155,8 +155,7 @@ class PostgreSQLRemoteCollector:
                     "predicate": r.get("predicate") or None,
                     **expression_key_fields(r),
                 }
-            if r.get("column_name") is not None:
-                indexes[name]["columns"].append(r["column_name"])
+            add_index_key(indexes[name], r, "postgresql")
         return list(indexes.values())
 
     def collect_foreign_keys(self, table_name: str) -> list[dict]:

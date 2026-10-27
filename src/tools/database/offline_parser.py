@@ -20,7 +20,7 @@ import boto3
 from src.shared.sample_rows import without_sample_rows
 from src.shared.sql_spans import span_dialect
 from src.tools.database.collection_text import extract_json_object
-from src.tools.database.index_keys import expression_key_fields
+from src.tools.database.index_keys import add_index_key, expression_key_fields
 from src.tools.sql.query_type import statement_query_type
 from src.tools.validation.ingestion_limits import check_collection_counts, check_file_size
 
@@ -181,6 +181,7 @@ def parse_offline_collection(
     for c in data.get("columns", []):
         columns_by_table.setdefault(c["table_name"], []).append(c)
 
+    source_engine = detect_source_engine(metadata if isinstance(metadata, dict) else None)[0]
     indexes_by_table: dict[str, dict[str, dict]] = {}
     for i in data.get("indexes", []):
         tbl = i["table_name"]
@@ -197,9 +198,9 @@ def parse_offline_collection(
                 "predicate": i.get("predicate") or None,
                 **expression_key_fields(i),
             }
-        # An expression key carries no column name; the index still counts.
-        if i.get("column_name") is not None:
-            indexes_by_table[tbl][idx_name]["columns"].append(i["column_name"])
+        # An expression key names no column (#295): the index still counts, and is
+        # flagged rather than narrowed to its plain keys, whatever the engine.
+        add_index_key(indexes_by_table[tbl][idx_name], i, source_engine)
 
     fks_by_table: dict[str, dict[str, dict]] = {}
     for fk in data.get("foreign_keys", []):
@@ -289,7 +290,7 @@ def parse_offline_collection(
             known_table_names,
             table_schemas=table_schemas,
             shadow=shadow,
-            source_engine=detect_source_engine(metadata if isinstance(metadata, dict) else None)[0],
+            source_engine=source_engine,
         ),
         "global_stats": global_stats,
         "io_stats": data.get("io_stats", {}),

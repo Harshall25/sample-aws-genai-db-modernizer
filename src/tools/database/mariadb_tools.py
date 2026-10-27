@@ -23,6 +23,11 @@ def _mariadb_version_gte(version: str, minimum: str) -> bool:
 class MariaDBRemoteCollector(MySQLRemoteCollector):
     """MariaDB collector — overrides query pattern collection for correct feature flags."""
 
+    def _statistics_has_expression(self) -> bool:
+        """MariaDB has no functional key parts, and its ``information_schema.statistics``
+        has no ``EXPRESSION`` column (#295)."""
+        return False
+
     def collect_query_patterns(self, min_executions: int = 10, limit: int = 1000) -> list[dict]:
         version = self.get_version()
 

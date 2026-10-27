@@ -1232,3 +1232,29 @@ def test_expression_index_note_reaches_the_merge_warnings():
     [table] = result.output["table_definitions"]
     assert table["indexes"] == ['CREATE INDEX "idx_slug" ON "topics" ("slug");']
     assert any("u_lower_status" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize("method", ["gin", "gist", "brin", "hash"])
+@pytest.mark.parametrize("generate", [generate_pg_ddl, generate_mysql_ddl])
+def test_an_expression_index_with_another_method_gets_one_note(generate, method):
+    """#295 with #293: the expression note is the one note, whatever the index's method;
+    the method checks never see an index the draft already leaves out."""
+    table = _typed_table(
+        [
+            {
+                "index_name": "idx_body_path",
+                "columns": [],
+                "is_unique": False,
+                "index_type": method,
+                "has_expressions": True,
+                "index_expressions": "(body -> 'path'::text)",
+            }
+        ]
+    )
+
+    result = generate([table], source_engine="postgresql")
+
+    assert result.tables[0].index_sql == []
+    [note] = result.index_notes
+    assert note["index"] == "idx_body_path"
+    assert note["reason"].startswith("Source index has expression keys")

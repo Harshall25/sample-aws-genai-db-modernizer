@@ -12,6 +12,7 @@ import re
 from src.tools.aws.ssm_executor import SSMExecutor
 from src.tools.database import live_sql
 from src.tools.database.filter_columns import where_columns
+from src.tools.database.index_keys import add_index_key
 from src.tools.database.live_sql import LiveQueryReader
 from src.tools.sql.query_type import statement_query_type
 
@@ -36,6 +37,7 @@ class MySQLRemoteCollector:
         self.database = database
         self.secret_arn = secret_arn
         self.region = region
+        self._statistics_expression: bool | None = None
 
     def _query(self, sql: str) -> list[dict]:
         """Execute SQL and return parsed rows."""
@@ -109,9 +111,20 @@ class MySQLRemoteCollector:
             ORDER BY ordinal_position
         """)  # nosec B608 — table_name from information_schema, not user input
 
+    def _statistics_has_expression(self) -> bool:
+        """Whether ``information_schema.statistics`` has the ``EXPRESSION`` column of a
+        functional key part: MySQL 8.0.13+ (MariaDB's collector says no). Asked once per
+        collector."""
+        if self._statistics_expression is None:
+            self._statistics_expression = _version_gte(self.get_version(), "8.0.13")
+        return self._statistics_expression
+
     def collect_indexes(self, table_name: str) -> list[dict]:
+        # A functional key part (MySQL 8.0.13+) has a NULL column_name; its text is in
+        # EXPRESSION, a column older servers and MariaDB do not have (#295).
+        expression = ", expression" if self._statistics_has_expression() else ""
         raw = self._query(f"""
-            SELECT index_name, column_name, seq_in_index, non_unique, index_type
+            SELECT index_name, column_name, seq_in_index, non_unique, index_type{expression}
             FROM information_schema.statistics
             WHERE table_schema = DATABASE()
               AND table_name = '{table_name}'
@@ -127,8 +140,10 @@ class MySQLRemoteCollector:
                     "is_unique": not r["non_unique"],
                     "is_primary": name == "PRIMARY",
                     "index_type": (str(r.get("index_type") or "btree")).lower(),
+                    "has_expressions": False,
+                    "index_expressions": None,
                 }
-            indexes[name]["columns"].append(r["column_name"])
+            add_index_key(indexes[name], r, "mysql")
         return list(indexes.values())
 
     def collect_foreign_keys(self, table_name: str) -> list[dict]:
